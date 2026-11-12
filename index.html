@@ -48,6 +48,7 @@
      ?mode=button     ring + answer on Enter key (Bluetooth remote) or a screen tap
      ?mode=always     keep a session open continuously (no ring; Santa greets on each restart)
      ?log=0           hide the debug log
+     ?open=8&close=22 office hours in local 24h time (default 8 am to 10 pm); asleep otherwise
    ======================================================================= */
 const AGENTS = {
   live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa
@@ -67,6 +68,10 @@ const CONFIG = {
   VOICE_THRESHOLD: 0.045,       // 0..1 RMS; raise if traffic triggers it, lower if kids can't trigger it
   VOICE_HOLD_MS: 500,           // must stay above threshold this long
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
+
+  // office hours (local time, 24h). Outside them Santa is "asleep": no ring, no calls, nothing billed.
+  OPEN_HOUR:  Number(q.get("open")  ?? 8),    // ?open=16 to start at 4 pm
+  CLOSE_HOUR: Number(q.get("close") ?? 22),   // ?close=21 to stop at 9 pm
 
   RESTART_DELAY_MS: 1500,       // always-mode gap between sessions
   CONNECT_TIMEOUT_MS: 25000,    // reload the page if "connecting" hangs this long
@@ -125,6 +130,12 @@ function setStatus(t) { statusEl.textContent = t; }
 function setMode(m) { document.body.classList.remove("listening", "speaking", "ringing"); if (m) document.body.classList.add(m); }
 function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function localHour() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: CONFIG.TIMEZONE })).getHours();
+}
+function isOpen() { const h = localHour(); return h >= CONFIG.OPEN_HOUR && h < CONFIG.CLOSE_HOUR; }
+function pad(n) { return (n % 12 || 12) + (n < 12 || n === 24 ? " am" : " pm"); }
 
 let lastTopics = [];
 function santaVariables() {
@@ -229,6 +240,7 @@ function stopVoiceWatch() {
 /* ---------- the call ---------- */
 async function startCall(reason) {
   if (!armed || ["ringing", "connecting", "live"].includes(state)) return;
+  if (!isOpen()) { log(`startCall (${reason}) ignored: outside office hours`); goToSleep(); return; }
   clearTimeout(restartTimer);
   log(`startCall (${reason})`);
 
@@ -274,6 +286,7 @@ async function endCall(reason) {
 
 function afterCall(failed = false) {
   conversation = null; state = "idle"; meta(); setMode(null);
+  if (!isOpen()) { goToSleep(); return; }
 
   if (Date.now() - bootedAt > CONFIG.RELOAD_EVERY_HOURS * 3600000) {
     log("scheduled reload"); sessionStorage.setItem("autoarm", "1"); location.reload(); return;
@@ -291,12 +304,34 @@ function afterCall(failed = false) {
   }
 }
 
+/* ---------- office hours: asleep outside them, wakes itself up in the morning ---------- */
+let asleep = false;
+function goToSleep() {
+  if (asleep) return;
+  asleep = true; stopVoiceWatch(); clearTimeout(restartTimer); setMode(null);
+  setStatus(`Santa is asleep. The hotline opens at ${pad(CONFIG.OPEN_HOUR)}.`);
+  log("office hours: closed");
+}
+function wakeUp() {
+  if (!asleep) return;
+  asleep = false; log("office hours: open");
+  if (CONFIG.MODE === "always") startCall("office hours open");
+  else if (CONFIG.MODE === "voice") startVoiceWatch();
+  else setStatus("Press the button to call Santa");
+}
+setInterval(() => {
+  if (!armed) return;
+  if (isOpen()) wakeUp();
+  else if (state === "idle" || state === "disarmed") goToSleep();   // never cut off a live call
+}, 60000);
+
 /* ---------- arming: one human gesture unlocks mic + audio for the evening ---------- */
 async function arm() {
   if (armed) return;
   try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); }
   catch (e) { setStatus("Microphone permission is required. Tap again and allow it."); log("mic denied: " + e.message); return; }
   audio(); armed = true; armBtn.classList.add("hidden"); await keepAwake(); log("armed");
+  if (!isOpen()) { goToSleep(); meta(); return; }
   if (CONFIG.MODE === "always") startCall("armed");
   else if (CONFIG.MODE === "voice") startVoiceWatch();
   else setStatus("Press the button to call Santa");
