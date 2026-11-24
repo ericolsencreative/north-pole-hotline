@@ -50,6 +50,7 @@
      ?log=0           hide the debug log
      ?open=8&close=22 office hours in local 24h time (default 8 am to 10 pm); asleep otherwise
      ?rings=2         rings before Santa answers (voice mode defaults to 0, button mode to 2)
+     ?vt=0.025        voice trigger sensitivity (lower = more sensitive); ?vh=400 how long speech must last (ms)
    ======================================================================= */
 const AGENTS = {
   live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa
@@ -68,8 +69,9 @@ const CONFIG = {
   RING_ON_MS: 1100, RING_OFF_MS: 700,
 
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
-  VOICE_THRESHOLD: 0.045,       // 0..1 RMS; raise if traffic triggers it, lower if kids can't trigger it
-  VOICE_HOLD_MS: 500,           // must stay above threshold this long
+  VOICE_THRESHOLD: Number(q.get("vt") ?? 0.025),  // 0..1 RMS; raise if traffic triggers it, lower if kids can't. ?vt=0.04
+  VOICE_HOLD_MS: Number(q.get("vh") ?? 400),      // speech must span this long (gaps between words allowed)
+  VOICE_GAP_MS: 350,            // a quiet gap shorter than this doesn't reset the clock
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
 
   // office hours (local time, 24h). Outside them Santa is "asleep": no ring, no calls, nothing billed.
@@ -205,7 +207,7 @@ const bootedAt = Date.now();
 function meta() { metaEl.textContent = `agent:${CONFIG.AGENT_ID === AGENTS.test ? "TEST" : "live"} mode:${CONFIG.MODE} state:${state} calls:${sessions} fails:${failures}`; }
 
 /* ---------- local voice trigger (nothing leaves the phone) ---------- */
-let vad = { stream: null, raf: null, above: 0, enabled: false, mutedUntil: 0 };
+let vad = { stream: null, raf: null, above: 0, lastLoud: 0, enabled: false, mutedUntil: 0 };
 async function startVoiceWatch() {
   if (CONFIG.MODE !== "voice" || vad.enabled) return;
   try {
@@ -223,9 +225,12 @@ async function startVoiceWatch() {
       vuEl.style.width = Math.min(100, rms * 800) + "%";
       const now = performance.now();
       if (now > vad.mutedUntil && rms > CONFIG.VOICE_THRESHOLD) {
-        if (!vad.above) vad.above = now;
+        if (!vad.above) vad.above = now;          // first loud frame of this utterance
+        vad.lastLoud = now;
         if (now - vad.above > CONFIG.VOICE_HOLD_MS) { log(`voice detected (rms ${rms.toFixed(3)})`); stopVoiceWatch(); startCall("voice"); return; }
-      } else vad.above = 0;
+      } else if (vad.above && now - vad.lastLoud > CONFIG.VOICE_GAP_MS) {
+        vad.above = 0;                            // real silence, not just a gap between words
+      }
       vad.raf = requestAnimationFrame(tick);
     };
     vad.raf = requestAnimationFrame(tick);
@@ -354,7 +359,7 @@ async function autoArm() {
   if (!remembered || armed) return;
   log("auto-arming (try " + (autoArmTries + 1) + ")");
   await arm().catch(() => {});
-  if (!armed && ++autoArmTries < 10) setTimeout(autoArm, 15000);   // mic may not be ready right after boot
+  if (!armed && ++autoArmTries < 40) setTimeout(autoArm, 3000);   // mic may not be ready right after boot
 }
 autoArm();
 
