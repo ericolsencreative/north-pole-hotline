@@ -51,7 +51,7 @@
      ?open=8&close=22 office hours in local 24h time (default 8 am to 10 pm); asleep otherwise
      ?rings=0         turn off the ringback tone (default: rings until Santa connects)
      ?fresh=0         don't reload the page between calls (default: reload, keeps audio clean)
-     ?vt=0.025        voice trigger sensitivity (lower = more sensitive); ?vh=400 how long speech must last (ms)
+     ?vr=3            voice must be this many times louder than background (higher = stricter); ?vh=350 min speech length (ms)
    ======================================================================= */
 const AGENTS = {
   live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa
@@ -71,9 +71,11 @@ const CONFIG = {
   RELOAD_AFTER_EACH_CALL: q.get("fresh") !== "0",   // reload the page between calls so every caller gets a clean audio stack
 
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
-  VOICE_THRESHOLD: Number(q.get("vt") ?? 0.025),  // 0..1 RMS; raise if traffic triggers it, lower if kids can't. ?vt=0.04
-  VOICE_HOLD_MS: Number(q.get("vh") ?? 400),      // speech must span this long (gaps between words allowed)
-  VOICE_GAP_MS: 350,            // a quiet gap shorter than this doesn't reset the clock
+  // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
+  VOICE_RATIO: Number(q.get("vr") ?? 3),          // how many times louder than background counts as a voice (?vr=4 stricter)
+  VOICE_MIN: Number(q.get("vt") ?? 0.004),        // absolute floor so a dead-silent room can't trigger on nothing
+  VOICE_HOLD_MS: Number(q.get("vh") ?? 350),      // speech must span this long (gaps between words allowed)
+  VOICE_GAP_MS: 400,            // a quiet gap shorter than this doesn't reset the clock
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
 
   // office hours (local time, 24h). Outside them Santa is "asleep": no ring, no calls, nothing billed.
@@ -228,17 +230,23 @@ async function startVoiceWatch() {
     const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
     const buf = new Float32Array(an.fftSize);
     vad.enabled = true; vad.above = 0;
+    let floor = 0.01, peak = 0, lastReport = performance.now();
     const tick = () => {
       if (!vad.enabled) return;
       an.getFloatTimeDomainData(buf);
       let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
       const rms = Math.sqrt(s / buf.length);
-      vuEl.style.width = Math.min(100, rms * 800) + "%";
       const now = performance.now();
-      if (now > vad.mutedUntil && rms > CONFIG.VOICE_THRESHOLD) {
+      // background level: drifts down quickly, up slowly, so speech doesn't get absorbed into it
+      floor = rms < floor ? floor * 0.95 + rms * 0.05 : floor * 0.995 + rms * 0.005;
+      const threshold = Math.max(CONFIG.VOICE_MIN, floor * CONFIG.VOICE_RATIO);
+      peak = Math.max(peak, rms);
+      vuEl.style.width = Math.min(100, (rms / (threshold * 2)) * 100) + "%";   // bar at 50% = right at the trigger line
+      if (now - lastReport > 5000) { log(`mic: peak ${peak.toFixed(4)} floor ${floor.toFixed(4)} trigger ${threshold.toFixed(4)}`); peak = 0; lastReport = now; }
+      if (now > vad.mutedUntil && rms > threshold) {
         if (!vad.above) vad.above = now;          // first loud frame of this utterance
         vad.lastLoud = now;
-        if (now - vad.above > CONFIG.VOICE_HOLD_MS) { log(`voice detected (rms ${rms.toFixed(3)})`); stopVoiceWatch(); startCall("voice"); return; }
+        if (now - vad.above > CONFIG.VOICE_HOLD_MS) { log(`voice detected (rms ${rms.toFixed(4)} vs ${threshold.toFixed(4)})`); stopVoiceWatch(); startCall("voice"); return; }
       } else if (vad.above && now - vad.lastLoud > CONFIG.VOICE_GAP_MS) {
         vad.above = 0;                            // real silence, not just a gap between words
       }
