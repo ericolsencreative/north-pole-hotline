@@ -317,7 +317,7 @@ function afterCall(failed = false) {
 
   if (CONFIG.RELOAD_AFTER_EACH_CALL && sessions > 0 && CONFIG.MODE !== "always") {
     log("call finished -> fresh page for the next caller"); setStatus("Santa is waiting by the phone…");
-    setTimeout(() => location.reload(), 1500); return;
+    setTimeout(() => location.reload(), 300); return;
   }
   if (Date.now() - bootedAt > CONFIG.RELOAD_EVERY_HOURS * 3600000) {
     log("scheduled reload"); location.reload(); return;
