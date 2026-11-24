@@ -258,7 +258,7 @@ function stopVoiceWatch() {
 
 /* ---------- the call ---------- */
 async function startCall(reason) {
-  if (!armed || ["ringing", "connecting", "live"].includes(state)) return;
+  if (!armed || ["ringing", "connecting", "live", "ending"].includes(state)) return;
   if (!isOpen()) { log(`startCall (${reason}) ignored: outside office hours`); goToSleep(); return; }
   clearTimeout(restartTimer);
   log(`startCall (${reason})`);
@@ -311,6 +311,7 @@ async function endCall(reason) {
 }
 
 function afterCall(failed = false) {
+  if (state === "idle" || state === "disarmed") return;   // already handled (endSession + onDisconnect can both land here)
   conversation = null; state = "idle"; meta(); setMode(null);
   if (!isOpen()) { goToSleep(); return; }
 
