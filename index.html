@@ -49,7 +49,8 @@
      ?mode=always     keep a session open continuously (no ring; Santa greets on each restart)
      ?log=0           hide the debug log
      ?open=8&close=22 office hours in local 24h time (default 8 am to 10 pm); asleep otherwise
-     ?rings=2         rings before Santa answers (voice mode defaults to 0, button mode to 2)
+     ?rings=0         turn off the ringback tone (default: rings until Santa connects)
+     ?fresh=0         don't reload the page between calls (default: reload, keeps audio clean)
      ?vt=0.025        voice trigger sensitivity (lower = more sensitive); ?vh=400 how long speech must last (ms)
    ======================================================================= */
 const AGENTS = {
@@ -63,10 +64,11 @@ const CONFIG = {
   MODE: q.get("mode") || "voice",           // voice | button | always
   SHOW_LOG: q.get("log") !== "0",
 
-  // rings before Santa picks up. Voice mode defaults to 0 (the caller already lifted the handset);
-  // button mode defaults to 2. Override with ?rings=N
-  RINGS: Number(q.get("rings") ?? ((q.get("mode") || "voice") === "voice" ? 0 : 2)),
-  RING_ON_MS: 1100, RING_OFF_MS: 700,
+  // Ringback: after the trigger, the caller hears the North Pole ringing until Santa picks up. ?rings=0 to disable.
+  RINGS: Number(q.get("rings") ?? 1),
+  RING_ON_MS: 1000, RING_OFF_MS: 900,
+
+  RELOAD_AFTER_EACH_CALL: q.get("fresh") !== "0",   // reload the page between calls so every caller gets a clean audio stack
 
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   VOICE_THRESHOLD: Number(q.get("vt") ?? 0.025),  // 0..1 RMS; raise if traffic triggers it, lower if kids can't. ?vt=0.04
@@ -163,31 +165,40 @@ function santaVariables() {
   };
 }
 
-/* ---------- audio: ring tone (classic North American ring, two tones) ---------- */
+/* ---------- audio: ringback tone (what you hear in the handset while the North Pole picks up) ---------- */
 let actx = null;
 function audio() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === "suspended") actx.resume(); return actx; }
+let ringback = { on: false, gain: null, timer: null, started: 0 };
 function ringOnce(ms) {
   const ctx = audio();
   const g = ctx.createGain(); g.gain.value = 0; g.connect(ctx.destination);
+  ringback.gain = g;
   const o1 = ctx.createOscillator(), o2 = ctx.createOscillator();
   o1.frequency.value = 440; o2.frequency.value = 480; o1.connect(g); o2.connect(g);
   const t = ctx.currentTime;
   g.gain.linearRampToValueAtTime(0.25, t + 0.03);
-  // a little tremolo so it sounds like a bell, not a buzzer
-  const lfo = ctx.createOscillator(), lg = ctx.createGain(); lfo.frequency.value = 20; lg.gain.value = 0.12; lfo.connect(lg); lg.connect(g.gain);
   g.gain.setValueAtTime(0.25, t + ms / 1000 - 0.05);
   g.gain.linearRampToValueAtTime(0, t + ms / 1000);
-  o1.start(t); o2.start(t); lfo.start(t);
-  o1.stop(t + ms / 1000); o2.stop(t + ms / 1000); lfo.stop(t + ms / 1000);
-  return sleep(ms);
+  o1.start(t); o2.start(t);
+  o1.stop(t + ms / 1000 + 0.05); o2.stop(t + ms / 1000 + 0.05);
 }
-async function ring() {
-  setMode("ringing"); setStatus("Ring… ring…");
-  for (let i = 0; i < CONFIG.RINGS; i++) {
-    await ringOnce(CONFIG.RING_ON_MS);
-    if (i < CONFIG.RINGS - 1) await sleep(CONFIG.RING_OFF_MS);
-  }
-  await sleep(250); // the "click" of Santa picking up
+// Rings until stopRingback() is called (Santa connected), with a minimum of one full ring so there is always a cue.
+function startRingback() {
+  if (ringback.on) return;
+  ringback.on = true; ringback.started = performance.now();
+  setMode("ringing"); setStatus("Calling the North Pole…");
+  const cycle = () => {
+    if (!ringback.on) return;
+    ringOnce(CONFIG.RING_ON_MS);
+    ringback.timer = setTimeout(cycle, CONFIG.RING_ON_MS + CONFIG.RING_OFF_MS);
+  };
+  cycle();
+}
+async function stopRingback() {
+  if (!ringback.on) return;
+  ringback.on = false; clearTimeout(ringback.timer);
+  try { const g = ringback.gain, t = audio().currentTime; g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(0, t + 0.05); } catch (e) {}
+  await sleep(250);                                     // the little "click" of Santa picking up
 }
 
 /* ---------- keep the screen awake ---------- */
@@ -252,10 +263,15 @@ async function startCall(reason) {
   clearTimeout(restartTimer);
   log(`startCall (${reason})`);
 
-  if (CONFIG.MODE !== "always" && CONFIG.RINGS > 0) { state = "ringing"; meta(); await ring(); }
+  const useRing = CONFIG.MODE !== "always" && CONFIG.RINGS > 0;
+  if (useRing) {
+    state = "ringing"; meta();
+    startRingback();
+    await sleep(CONFIG.RING_ON_MS + CONFIG.RING_OFF_MS);   // one full ring before we even dial
+  }
 
   state = "connecting"; meta();
-  setStatus("Connecting to the North Pole…"); setMode(null);
+  if (!useRing) { setStatus("Connecting to the North Pole…"); setMode(null); }
   connectTimer = setTimeout(() => { log("connect timeout -> reload"); location.reload(); }, CONFIG.CONNECT_TIMEOUT_MS);
 
   try {
@@ -263,8 +279,9 @@ async function startCall(reason) {
       agentId: CONFIG.AGENT_ID,
       connectionType: "webrtc",
       dynamicVariables: santaVariables(),
-      onConnect: () => {
+      onConnect: async () => {
         clearTimeout(connectTimer);
+        await stopRingback();
         state = "live"; sessions++; failures = 0; meta();
         setStatus("Santa is on the line!"); setMode("listening"); log("connected");
         callTimer = setTimeout(() => { log("page max call length -> ending"); endCall("max length"); }, CONFIG.MAX_CALL_MINUTES * 60000);
@@ -280,6 +297,7 @@ async function startCall(reason) {
     });
   } catch (e) {
     clearTimeout(connectTimer); failures++; meta();
+    await stopRingback();
     log("startSession failed: " + (e && e.message ? e.message : e));
     afterCall(true);
   }
@@ -296,6 +314,10 @@ function afterCall(failed = false) {
   conversation = null; state = "idle"; meta(); setMode(null);
   if (!isOpen()) { goToSleep(); return; }
 
+  if (CONFIG.RELOAD_AFTER_EACH_CALL && sessions > 0 && CONFIG.MODE !== "always") {
+    log("call finished -> fresh page for the next caller"); setStatus("Santa is waiting by the phone…");
+    setTimeout(() => location.reload(), 1500); return;
+  }
   if (Date.now() - bootedAt > CONFIG.RELOAD_EVERY_HOURS * 3600000) {
     log("scheduled reload"); location.reload(); return;
   }
