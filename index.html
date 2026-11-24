@@ -231,11 +231,12 @@ async function startVoiceWatch() {
     try {
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
       log("mics: " + devs.map(d => `"${d.label || "(no name)"}"`).join(", "));
-      if (want) {
-        const hit = devs.find(d => d.label.toLowerCase().includes(want));
-        if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; log(`using mic matching "${want}": ${hit.label}`); }
-        else log(`no mic matching "${want}", using default`);
-      }
+      // Android's "Default" is the phone's own mic. If a handset is plugged in, use it: the caller is talking into that.
+      const prefs = want ? [want] : ["wired headset", "headset", "usb", "wired"];
+      let hit = null;
+      for (const p of prefs) { hit = devs.find(d => d.label.toLowerCase().includes(p)); if (hit) break; }
+      if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; log(`using mic: ${hit.label}`); }
+      else log(want ? `no mic matching "${want}", using default` : "no headset mic found, using default");
     } catch (e) { log("enumerateDevices failed: " + e.message); }
     vad.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     const track = vad.stream.getAudioTracks()[0];
