@@ -73,8 +73,9 @@ const CONFIG = {
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
   VOICE_RATIO: Number(q.get("vr") ?? 3),          // how many times louder than background counts as a voice (?vr=4 stricter)
-  VOICE_MIN: Number(q.get("vt") ?? 0.004),        // absolute floor so a dead-silent room can't trigger on nothing
-  VOICE_HOLD_MS: Number(q.get("vh") ?? 350),      // speech must span this long (gaps between words allowed)
+  VOICE_MIN: Number(q.get("vt") ?? 0.012),        // absolute floor so a dead-silent room can't trigger on nothing (?vt=0.02 stricter)
+  VOICE_HOLD_MS: Number(q.get("vh") ?? 450),      // speech must span this long (gaps between words allowed)
+  VOICE_GRACE_MS: 3000,         // after (re)arming, ignore sound this long: lets the background level settle, skips cradle clatter
   VOICE_GAP_MS: 400,            // a quiet gap shorter than this doesn't reset the clock
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
 
@@ -230,6 +231,7 @@ async function startVoiceWatch() {
     const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
     const buf = new Float32Array(an.fftSize);
     vad.enabled = true; vad.above = 0;
+    vad.mutedUntil = Math.max(vad.mutedUntil, performance.now() + CONFIG.VOICE_GRACE_MS);
     let floor = 0.01, peak = 0, lastReport = performance.now();
     const tick = () => {
       if (!vad.enabled) return;
@@ -242,7 +244,7 @@ async function startVoiceWatch() {
       const threshold = Math.max(CONFIG.VOICE_MIN, floor * CONFIG.VOICE_RATIO);
       peak = Math.max(peak, rms);
       vuEl.style.width = Math.min(100, (rms / (threshold * 2)) * 100) + "%";   // bar at 50% = right at the trigger line
-      if (now - lastReport > 5000) { log(`mic: peak ${peak.toFixed(4)} floor ${floor.toFixed(4)} trigger ${threshold.toFixed(4)}`); peak = 0; lastReport = now; }
+      if (now - lastReport > 5000) { log(`mic: peak ${peak.toFixed(4)} floor ${floor.toFixed(4)} trigger ${threshold.toFixed(4)}${now < vad.mutedUntil ? " (settling)" : ""}`); peak = 0; lastReport = now; }
       if (now > vad.mutedUntil && rms > threshold) {
         if (!vad.above) vad.above = now;          // first loud frame of this utterance
         vad.lastLoud = now;
