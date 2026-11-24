@@ -225,8 +225,24 @@ let vad = { stream: null, raf: null, above: 0, lastLoud: 0, enabled: false, mute
 async function startVoiceWatch() {
   if (CONFIG.MODE !== "voice" || vad.enabled) return;
   try {
-    vad.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    // Which microphone? Default is whatever Android calls default. ?mic=usb (or any word) picks the first device whose name contains it.
+    let audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: true };
+    const want = (q.get("mic") || "").toLowerCase();
+    try {
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
+      log("mics: " + devs.map(d => `"${d.label || "(no name)"}"`).join(", "));
+      if (want) {
+        const hit = devs.find(d => d.label.toLowerCase().includes(want));
+        if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; log(`using mic matching "${want}": ${hit.label}`); }
+        else log(`no mic matching "${want}", using default`);
+      }
+    } catch (e) { log("enumerateDevices failed: " + e.message); }
+    vad.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    const track = vad.stream.getAudioTracks()[0];
+    log(`listening on: "${track.label}" muted=${track.muted} enabled=${track.enabled}`);
+    track.onmute = () => log("mic track went MUTED"); track.onunmute = () => log("mic track unmuted");
     const ctx = audio();
+    if (ctx.state !== "running") { log("audio context state: " + ctx.state + " (trying to resume)"); try { await ctx.resume(); } catch (e) {} log("audio context now: " + ctx.state); }
     const src = ctx.createMediaStreamSource(vad.stream);
     const an = ctx.createAnalyser(); an.fftSize = 1024; src.connect(an);
     const buf = new Float32Array(an.fftSize);
