@@ -70,6 +70,10 @@ const CONFIG = {
 
   RELOAD_AFTER_EACH_CALL: q.get("fresh") !== "0",   // reload the page between calls so every caller gets a clean audio stack
 
+  // The page hangs up itself when Santa says his sign-off (matches the goodbye wording in the agent prompt).
+  GOODBYE_RE: /goodbye for now|good list[\s\S]{0,220}(sleep|goodbye|bye)|(sleep|goodbye)[\s\S]{0,220}good list/i,
+  GOODBYE_MAX_MS: 12000,        // if he keeps talking after the goodbye, hang up anyway after this long
+
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
   VOICE_RATIO: Number(q.get("vr") ?? 3),          // how many times louder than background counts as a voice (?vr=4 stricter)
@@ -214,6 +218,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 
 /* ---------- state ---------- */
 let conversation = null;
+let goodbyeSaid = false, goodbyeTimer = null;
 let state = "disarmed";           // disarmed | idle | ringing | connecting | live | ending
 let armed = false, sessions = 0, failures = 0;
 let connectTimer = null, callTimer = null, restartTimer = null;
@@ -319,7 +324,22 @@ async function startCall(reason) {
         afterCall();
       },
       onError: (err) => log("error: " + (err && err.message ? err.message : JSON.stringify(err))),
-      onModeChange: (m) => { setMode(m.mode === "speaking" ? "speaking" : "listening"); setStatus(m.mode === "speaking" ? "Santa is talking…" : "Santa is listening…"); },
+      // Santa's lines arrive here as text. When he says the goodbye, the page hangs up as soon as he finishes speaking,
+      // whether or not the agent remembers to call its own end_call tool.
+      onMessage: (msg) => {
+        const who = msg && (msg.source || msg.role), text = String((msg && msg.message) || "");
+        if (who === "ai" && text) {
+          log("santa: " + text.slice(0, 80));
+          if (CONFIG.GOODBYE_RE.test(text)) {
+            goodbyeSaid = true; log("goodbye detected -> will hang up when he finishes");
+            clearTimeout(goodbyeTimer); goodbyeTimer = setTimeout(() => endCall("goodbye (timer)"), CONFIG.GOODBYE_MAX_MS);
+          }
+        }
+      },
+      onModeChange: (m) => {
+        setMode(m.mode === "speaking" ? "speaking" : "listening"); setStatus(m.mode === "speaking" ? "Santa is talking…" : "Santa is listening…");
+        if (m.mode !== "speaking" && goodbyeSaid && state === "live") { clearTimeout(goodbyeTimer); setTimeout(() => endCall("goodbye finished"), 700); }
+      },
       onStatusChange: (s) => log("status: " + s.status),
     });
   } catch (e) {
