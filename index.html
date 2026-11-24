@@ -49,6 +49,7 @@
      ?mode=always     keep a session open continuously (no ring; Santa greets on each restart)
      ?log=0           hide the debug log
      ?open=8&close=22 office hours in local 24h time (default 8 am to 10 pm); asleep otherwise
+     ?rings=2         rings before Santa answers (voice mode defaults to 0, button mode to 2)
    ======================================================================= */
 const AGENTS = {
   live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa
@@ -61,7 +62,9 @@ const CONFIG = {
   MODE: q.get("mode") || "voice",           // voice | button | always
   SHOW_LOG: q.get("log") !== "0",
 
-  RINGS: 2,                     // how many rings before Santa picks up
+  // rings before Santa picks up. Voice mode defaults to 0 (the caller already lifted the handset);
+  // button mode defaults to 2. Override with ?rings=N
+  RINGS: Number(q.get("rings") ?? ((q.get("mode") || "voice") === "voice" ? 0 : 2)),
   RING_ON_MS: 1100, RING_OFF_MS: 700,
 
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
@@ -244,7 +247,7 @@ async function startCall(reason) {
   clearTimeout(restartTimer);
   log(`startCall (${reason})`);
 
-  if (CONFIG.MODE !== "always") { state = "ringing"; meta(); await ring(); }
+  if (CONFIG.MODE !== "always" && CONFIG.RINGS > 0) { state = "ringing"; meta(); await ring(); }
 
   state = "connecting"; meta();
   setStatus("Connecting to the North Pole…"); setMode(null);
@@ -289,7 +292,7 @@ function afterCall(failed = false) {
   if (!isOpen()) { goToSleep(); return; }
 
   if (Date.now() - bootedAt > CONFIG.RELOAD_EVERY_HOURS * 3600000) {
-    log("scheduled reload"); sessionStorage.setItem("autoarm", "1"); location.reload(); return;
+    log("scheduled reload"); location.reload(); return;
   }
   if (CONFIG.MODE === "always") {
     const delay = failed ? Math.min(60000, CONFIG.RESTART_DELAY_MS * Math.pow(2, failures)) : CONFIG.RESTART_DELAY_MS;
@@ -331,6 +334,7 @@ async function arm() {
   try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); }
   catch (e) { setStatus("Microphone permission is required. Tap again and allow it."); log("mic denied: " + e.message); return; }
   audio(); armed = true; armBtn.classList.add("hidden"); await keepAwake(); log("armed");
+  try { localStorage.setItem("npH_armed", "1"); } catch (e) {}   // remember forever: no tap needed after reboots/reloads
   if (!isOpen()) { goToSleep(); meta(); return; }
   if (CONFIG.MODE === "always") startCall("armed");
   else if (CONFIG.MODE === "voice") startVoiceWatch();
@@ -338,7 +342,21 @@ async function arm() {
   meta();
 }
 armBtn.addEventListener("click", arm);
-if (sessionStorage.getItem("autoarm")) { sessionStorage.removeItem("autoarm"); arm().catch(() => {}); }
+
+// Once the line has been opened by a human tap, every later load (reboot, crash reload, scheduled reload)
+// re-arms itself. Chrome keeps the mic permission; Fully Kiosk also allows audio without a gesture.
+// Add ?reset=1 to the URL to forget this and require a tap again.
+if (q.get("reset")) { try { localStorage.removeItem("npH_armed"); } catch (e) {} }
+let autoArmTries = 0;
+async function autoArm() {
+  let remembered = false;
+  try { remembered = localStorage.getItem("npH_armed") === "1"; } catch (e) {}
+  if (!remembered || armed) return;
+  log("auto-arming (try " + (autoArmTries + 1) + ")");
+  await arm().catch(() => {});
+  if (!armed && ++autoArmTries < 10) setTimeout(autoArm, 15000);   // mic may not be ready right after boot
+}
+autoArm();
 
 /* ---------- physical trigger: Enter from a Bluetooth remote, or a tap on Santa ---------- */
 function trigger(src) {
