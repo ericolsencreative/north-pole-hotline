@@ -78,8 +78,8 @@ const CONFIG = {
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
   VOICE_RATIO: Number(q.get("vr") ?? 3),          // how many times louder than background counts as a voice (?vr=4 stricter)
-  VOICE_MIN: Number(q.get("vt") ?? 0.012),        // absolute floor so a dead-silent room can't trigger on nothing (?vt=0.02 stricter)
-  VOICE_HOLD_MS: Number(q.get("vh") ?? 450),      // speech must span this long (gaps between words allowed)
+  VOICE_MIN: Number(q.get("vt") ?? 0.05),         // absolute floor: speech into the handset measures ~0.3, room noise well under 0.02
+  VOICE_HOLD_MS: Number(q.get("vh") ?? 600),      // speech must span this long (gaps between words allowed)
   VOICE_GRACE_MS: 3000,         // after (re)arming, ignore sound this long: lets the background level settle, skips cradle clatter
   VOICE_GAP_MS: 400,            // a quiet gap shorter than this doesn't reset the clock
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
@@ -233,7 +233,7 @@ async function startVoiceWatch() {
   if (CONFIG.MODE !== "voice" || vad.enabled) return;
   try {
     // Which microphone? Default is whatever Android calls default. ?mic=usb (or any word) picks the first device whose name contains it.
-    let audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: true };
+    let audioConstraints = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };  // no AGC: it amplifies room hiss into "voice"
     const want = (q.get("mic") || "").toLowerCase();
     try {
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audioinput");
