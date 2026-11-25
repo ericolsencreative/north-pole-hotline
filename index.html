@@ -72,8 +72,8 @@ const CONFIG = {
 
   // The page hangs up itself when Santa says his sign-off (matches the goodbye wording in the agent prompt).
   GOODBYE_RE: /goodbye for now|good list[\s\S]{0,220}(sleep|goodbye|bye)|(sleep|goodbye)[\s\S]{0,220}good list/i,
-  MS_PER_WORD: Number(q.get("wpm") ? 60000 / Number(q.get("wpm")) : 430),  // Santa talks slowly: ~140 words a minute
-  GOODBYE_PAD_MS: 1800,         // extra time after the estimated end of the goodbye before the line goes dead
+  GOODBYE_LINGER_MS: Number(q.get("linger") ?? 10) * 1000,  // after the goodbye, hang up this long after Santa last stops talking
+  GOODBYE_CAP_MS: 45000,        // and never more than this long after the goodbye was said
 
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
@@ -219,7 +219,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 
 /* ---------- state ---------- */
 let conversation = null;
-let goodbyeSaid = false, goodbyeTimer = null, goodbyeReadyAt = 0;
+let goodbyeSaid = false, goodbyeTimer = null, lingerTimer = null;
 let state = "disarmed";           // disarmed | idle | ringing | connecting | live | ending
 let armed = false, sessions = 0, failures = 0;
 let connectTimer = null, callTimer = null, restartTimer = null;
@@ -333,20 +333,19 @@ async function startCall(reason) {
           log("santa: " + text.slice(0, 80));
           if (CONFIG.GOODBYE_RE.test(text) && !goodbyeSaid) {
             goodbyeSaid = true;
-            // the text arrives before the audio has played: estimate how long he needs to say it, then add padding
-            const words = text.trim().split(/\s+/).length;
-            const speakMs = words * CONFIG.MS_PER_WORD + CONFIG.GOODBYE_PAD_MS;
-            goodbyeReadyAt = performance.now() + speakMs;
-            log(`goodbye detected (${words} words) -> hanging up in ~${(speakMs / 1000).toFixed(1)}s`);
-            clearTimeout(goodbyeTimer); goodbyeTimer = setTimeout(() => endCall("goodbye finished"), speakMs);
+            log(`goodbye detected -> line closes ${CONFIG.GOODBYE_LINGER_MS / 1000}s after he stops talking`);
+            // hard cap so a chatty caller can't keep the line open forever after the goodbye
+            clearTimeout(goodbyeTimer); goodbyeTimer = setTimeout(() => endCall("goodbye (cap)"), CONFIG.GOODBYE_CAP_MS);
           }
         }
       },
       onModeChange: (m) => {
         setMode(m.mode === "speaking" ? "speaking" : "listening"); setStatus(m.mode === "speaking" ? "Santa is talking…" : "Santa is listening…");
-        // if he finishes speaking later than the estimate, hang up a moment after he actually stops
-        if (m.mode !== "speaking" && goodbyeSaid && state === "live" && performance.now() > goodbyeReadyAt) {
-          clearTimeout(goodbyeTimer); setTimeout(() => endCall("goodbye finished (late)"), 800);
+        // after the goodbye: every time Santa stops talking, (re)start the linger clock; if the caller says bye and
+        // Santa answers, the clock restarts after that too. Hang up when it runs out.
+        if (goodbyeSaid && state === "live") {
+          clearTimeout(lingerTimer);
+          if (m.mode !== "speaking") lingerTimer = setTimeout(() => endCall("goodbye finished"), CONFIG.GOODBYE_LINGER_MS);
         }
       },
       onStatusChange: (s) => log("status: " + s.status),
