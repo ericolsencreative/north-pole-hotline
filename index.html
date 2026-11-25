@@ -43,7 +43,7 @@
    NORTH POLE HOTLINE — kiosk page for an ElevenLabs agent
 
    URL switches (no editing needed):
-     ?agent=test      use the 2026 TEST agent instead of last year's
+     ?agent=live      use last year's Santa instead of the 2026 one (default is 2026)
      ?mode=voice      ring + answer when the page hears a voice nearby (default)
      ?mode=button     ring + answer on Enter key (Bluetooth remote) or a screen tap
      ?mode=always     keep a session open continuously (no ring; Santa greets on each restart)
@@ -54,13 +54,13 @@
      ?vr=3            voice must be this many times louder than background (higher = stricter); ?vh=350 min speech length (ms)
    ======================================================================= */
 const AGENTS = {
-  live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa
-  test: "agent_3701m75zvsq1fenvn0vgr9wefdye",   // North Pole Hotline 2026 (TEST)
+  test: "agent_3701m75zvsq1fenvn0vgr9wefdye",   // North Pole Hotline 2026 — the one that goes live (default)
+  live: "agent_2401kb3jpnvmejs9ma57ra41b85r",   // last year's Santa, kept for comparison: ?agent=live
 };
 const q = new URLSearchParams(location.search);
 
 const CONFIG = {
-  AGENT_ID: AGENTS[q.get("agent")] || AGENTS.live,
+  AGENT_ID: AGENTS[q.get("agent")] || AGENTS.test,
   MODE: q.get("mode") || "voice",           // voice | button | always
   SHOW_LOG: q.get("log") !== "0",
 
@@ -134,7 +134,7 @@ try {
 /* ---------- helpers ---------- */
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status"), armBtn = $("arm"), logEl = $("log"), metaEl = $("meta"), vuEl = document.querySelector("#vu i");
-if (CONFIG.SHOW_LOG) logEl.classList.remove("hidden");
+if (CONFIG.SHOW_LOG) logEl.classList.remove("hidden"); else document.getElementById("vu").classList.add("hidden");
 
 function log(msg) {
   const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -152,7 +152,9 @@ function localHour() {
 function isOpen() { const h = localHour(); return h >= CONFIG.OPEN_HOUR && h < CONFIG.CLOSE_HOUR; }
 function pad(n) { return (n % 12 || 12) + (n < 12 || n === 24 ? " am" : " pm"); }
 
+// remembered across the per-call page reload, so back-to-back callers don't get the same three topics
 let lastTopics = [];
+try { lastTopics = JSON.parse(localStorage.getItem("npH_lastTopics") || "[]"); } catch (e) {}
 function santaVariables() {
   const now = new Date();
   const local = new Date(now.toLocaleString("en-US", { timeZone: CONFIG.TIMEZONE }));
@@ -164,6 +166,7 @@ function santaVariables() {
   // pick 3 topics, avoiding the previous call's 3 so back-to-back kids get different calls
   let pick = shuffle(TOPICS.filter(t => !lastTopics.includes(t))).slice(0, 3);
   lastTopics = pick;
+  try { localStorage.setItem("npH_lastTopics", JSON.stringify(pick)); } catch (e) {}
   log("topics: " + pick.map(t => t.split(":")[0]).join(" | "));
   return {
     sleeps_until_christmas: String(sleeps),
@@ -228,7 +231,7 @@ function meta() { metaEl.textContent = `agent:${CONFIG.AGENT_ID === AGENTS.test 
 
 /* ---------- local voice trigger (nothing leaves the phone) ---------- */
 let vad = { stream: null, raf: null, above: 0, lastLoud: 0, enabled: false, mutedUntil: 0 };
-let handsetMicId = null;   // the handset's microphone, once found; the ElevenLabs call is pointed at it too
+let handsetMicId = null;   // the handset's microphone, once found (used for the listener; the live call is routed by Android)
 async function startVoiceWatch() {
   if (CONFIG.MODE !== "voice" || vad.enabled) return;
   try {
@@ -249,6 +252,8 @@ async function startVoiceWatch() {
     const track = vad.stream.getAudioTracks()[0];
     log(`listening on: "${track.label}" muted=${track.muted} enabled=${track.enabled}`);
     track.onmute = () => log("mic track went MUTED"); track.onunmute = () => log("mic track unmuted");
+    // if the mic disappears (handset unplugged, Android reclaimed it), start over rather than listening to nothing
+    track.onended = () => { log("mic track ended -> restarting listener"); stopVoiceWatch(); setTimeout(startVoiceWatch, 2000); };
     const ctx = audio();
     if (ctx.state !== "running") { log("audio context state: " + ctx.state + " (trying to resume)"); try { await ctx.resume(); } catch (e) {} log("audio context now: " + ctx.state); }
     const src = ctx.createMediaStreamSource(vad.stream);
@@ -276,16 +281,20 @@ async function startVoiceWatch() {
       } else if (vad.above && now - vad.lastLoud > CONFIG.VOICE_GAP_MS) {
         vad.above = 0;                            // real silence, not just a gap between words
       }
-      vad.raf = requestAnimationFrame(tick);
     };
-    vad.raf = requestAnimationFrame(tick);
+    // a plain timer, not requestAnimationFrame: rAF pauses whenever the display is off, and Santa must not go deaf with it
+    vad.raf = setInterval(tick, 40);
     log("listening for a voice nearby");
     setStatus("Santa is waiting by the phone…");
-  } catch (e) { log("voice watch failed: " + e.message); }
+  } catch (e) {
+    log("voice watch failed: " + e.message + " -> retrying in 5s");
+    stopVoiceWatch();
+    if (armed && !asleep) setTimeout(startVoiceWatch, 5000);
+  }
 }
 function stopVoiceWatch() {
   vad.enabled = false;
-  if (vad.raf) cancelAnimationFrame(vad.raf);
+  if (vad.raf) clearInterval(vad.raf);
   if (vad.stream) vad.stream.getTracks().forEach(t => t.stop());
   vad.stream = null; vuEl.style.width = "0";
 }
@@ -412,7 +421,19 @@ setInterval(() => {
   if (!armed) return;
   if (isOpen()) wakeUp();
   else if (state === "idle" || state === "disarmed") goToSleep();   // never cut off a live call
+  // hygiene: on a quiet day with no calls, still start from a fresh page every few hours
+  if ((state === "idle" || state === "disarmed") && Date.now() - bootedAt > CONFIG.RELOAD_EVERY_HOURS * 3600000) {
+    log("idle hygiene reload"); location.reload();
+  }
 }, 60000);
+
+// handset plugged in or pulled out while idle: reload so the mic choice and audio routing start clean
+if (navigator.mediaDevices && "ondevicechange" in navigator.mediaDevices) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    log("audio devices changed");
+    if (state === "idle" || state === "disarmed") setTimeout(() => location.reload(), 1500);
+  });
+}
 
 /* ---------- arming: one human gesture unlocks mic + audio for the evening ---------- */
 async function arm() {
