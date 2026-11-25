@@ -228,6 +228,7 @@ function meta() { metaEl.textContent = `agent:${CONFIG.AGENT_ID === AGENTS.test 
 
 /* ---------- local voice trigger (nothing leaves the phone) ---------- */
 let vad = { stream: null, raf: null, above: 0, lastLoud: 0, enabled: false, mutedUntil: 0 };
+let handsetMicId = null;   // the handset's microphone, once found; the ElevenLabs call is pointed at it too
 async function startVoiceWatch() {
   if (CONFIG.MODE !== "voice" || vad.enabled) return;
   try {
@@ -241,7 +242,7 @@ async function startVoiceWatch() {
       const prefs = want ? [want] : ["wired headset", "headset", "usb", "wired"];
       let hit = null;
       for (const p of prefs) { hit = devs.find(d => d.label.toLowerCase().includes(p)); if (hit) break; }
-      if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; log(`using mic: ${hit.label}`); }
+      if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; handsetMicId = hit.deviceId; log(`using mic: ${hit.label}`); }
       else log(want ? `no mic matching "${want}", using default` : "no headset mic found, using default");
     } catch (e) { log("enumerateDevices failed: " + e.message); }
     vad.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
@@ -350,6 +351,12 @@ async function startCall(reason) {
       },
       onStatusChange: (s) => log("status: " + s.status),
     });
+    // Make Santa listen through the handset too, not the phone's own mic (which would also hear his voice
+    // leaking from the earpiece and treat it as an interruption).
+    if (handsetMicId && conversation && typeof conversation.changeInputDevice === "function") {
+      try { await conversation.changeInputDevice({ inputDeviceId: handsetMicId }); log("call mic -> handset"); }
+      catch (e) { log("could not switch call mic to handset: " + (e && e.message ? e.message : e)); }
+    }
   } catch (e) {
     clearTimeout(connectTimer); failures++; meta();
     await stopRingback();
