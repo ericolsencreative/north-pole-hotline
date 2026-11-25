@@ -78,8 +78,8 @@ const CONFIG = {
   // voice trigger: how loud and how long someone must talk near the crate before Santa answers
   // Adaptive voice trigger: fires when sound is clearly louder than the room's background.
   VOICE_RATIO: Number(q.get("vr") ?? 3),          // how many times louder than background counts as a voice (?vr=4 stricter)
-  VOICE_MIN: Number(q.get("vt") ?? 0.05),         // absolute floor: speech into the handset measures ~0.3, room noise well under 0.02
-  VOICE_HOLD_MS: Number(q.get("vh") ?? 600),      // speech must span this long (gaps between words allowed)
+  VOICE_MIN: Number(q.get("vt") ?? 0.03),         // absolute floor: normal speech into the handset ~0.3, a quiet kid ~0.05, room noise under 0.02
+  VOICE_HOLD_MS: Number(q.get("vh") ?? 500),      // speech must span this long (gaps between words allowed)
   VOICE_GRACE_MS: 3000,         // after (re)arming, ignore sound this long: lets the background level settle, skips cradle clatter
   VOICE_GAP_MS: 400,            // a quiet gap shorter than this doesn't reset the clock
   VOICE_COOLDOWN_MS: 4000,      // ignore sound for this long after a call ends (Santa's own goodbye, etc.)
@@ -351,12 +351,8 @@ async function startCall(reason) {
       },
       onStatusChange: (s) => log("status: " + s.status),
     });
-    // Make Santa listen through the handset too, not the phone's own mic (which would also hear his voice
-    // leaking from the earpiece and treat it as an interruption).
-    if (handsetMicId && conversation && typeof conversation.changeInputDevice === "function") {
-      try { await conversation.changeInputDevice({ inputDeviceId: handsetMicId }); log("call mic -> handset"); }
-      catch (e) { log("could not switch call mic to handset: " + (e && e.message ? e.message : e)); }
-    }
+    // Note: the live call's microphone is left to Android, which routes calls to a plugged-in handset on its own.
+    // Forcing it with changeInputDevice() produced a dead input on the S20 FE, so don't.
   } catch (e) {
     clearTimeout(connectTimer); failures++; meta();
     await stopRingback();
