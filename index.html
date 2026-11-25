@@ -246,8 +246,9 @@ async function startVoiceWatch() {
       let hit = null;
       for (const p of prefs) { hit = devs.find(d => d.label.toLowerCase().includes(p)); if (hit) break; }
       if (hit) { audioConstraints.deviceId = { exact: hit.deviceId }; handsetMicId = hit.deviceId; log(`using mic: ${hit.label}`); }
-      else log(want ? `no mic matching "${want}", using default` : "no headset mic found, using default");
-    } catch (e) { log("enumerateDevices failed: " + e.message); }
+      else if (q.get("mic") === "any") log("no headset mic found, using default (?mic=any)");
+      else throw new Error("handset microphone not found; never using the phone's own mic. Is the handset plugged in?");
+    } catch (e) { if (!/handset microphone/.test(e.message)) log("enumerateDevices failed: " + e.message); else throw e; }
     vad.stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
     const track = vad.stream.getAudioTracks()[0];
     log(`listening on: "${track.label}" muted=${track.muted} enabled=${track.enabled}`);
